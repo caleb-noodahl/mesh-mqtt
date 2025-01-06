@@ -50,7 +50,7 @@ func (h *UserHook) ID() string {
 func (h *UserHook) Provides(b byte) bool {
 	return bytes.Contains([]byte{
 		mqtt.OnConnect,
-		mqtt.OnDisconnect,
+		//mqtt.OnDisconnect,
 	}, []byte{b})
 }
 

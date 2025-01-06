@@ -1,0 +1,4 @@
+mqtt: 192.168.1.212
+radio_port: /dev/tty.usbmodem34851895EC001
+hook_db: _hook.db
+cache_db: _cache.db

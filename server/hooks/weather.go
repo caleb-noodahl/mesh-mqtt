@@ -60,7 +60,7 @@ func (r *WeatherHook) Init(config any) error {
 	}
 
 	// wait for node to come online
-	r.nextStatus = time.Now().Add(60 * time.Second).Unix()
+	//r.nextStatus = time.Now().Add(60 * time.Second).Unix()
 	return nil
 }
 
@@ -75,12 +75,15 @@ func (r *WeatherHook) OnSysInfoTick(si *system.Info) {
 		si.Uptime,
 		si.ClientsConnected,
 		si.MemoryAlloc),
-		0, 2)
+		0, 0)
 	// top of the hour, every hour
 	r.nextStatus = time.Now().Truncate(time.Hour).Add(time.Hour).Unix()
 
 	// query the radio to determine which nodes expose gps coords to fetch weather forecasts
-	r.config.Radio.Info()
+	if err := r.config.Radio.Info(); err != nil {
+		r.config.Server.Log.Error("error getting radio info ", err)
+	}
+
 	// outer iterator to keep from querying noaa twice for the same cwa/grid
 	dedupe := map[string]bool{}
 	for key, userPos := range r.config.Radio.UserDir() {
@@ -94,7 +97,6 @@ func (r *WeatherHook) OnSysInfoTick(si *system.Info) {
 			if errors.Is(err, pebble.ErrNotFound) {
 				r.config.Server.Log.Info("error fetching client not found: ", key)
 			}
-			continue
 		} else {
 			// only close a pebble db query if its successful
 			closer.Close()
@@ -109,9 +111,13 @@ func (r *WeatherHook) OnSysInfoTick(si *system.Info) {
 			continue
 		}
 
+		lat, long := float64(userPos.Pos.LatitudeI)/1e7, float64(userPos.Pos.LongitudeI)/1e7
+		if lat == 0 || long == 0 {
+			r.config.Server.Log.Error("invalid lat: %v and/or long: %v", lat, long)
+			continue
+		}
 		// fetch noaa cwa and grid data for forecasts
 		if nr.GridID == "" {
-			lat, long := float64(userPos.Pos.LatitudeI)/1e7, float64(userPos.Pos.LongitudeI)/1e7
 			points, err := r.config.NOAA.Points(lat, long)
 			if err != nil {
 				r.config.Server.Log.Error("error fetching points from noaa @", lat, ",", long)
@@ -123,7 +129,7 @@ func (r *WeatherHook) OnSysInfoTick(si *system.Info) {
 
 			// cache it so we don't have to query noaa twice for the same node
 			if nodebytes, err = json.Marshal(nr); err != nil {
-				r.config.Server.Log.Error("error update user ", key)
+				r.config.Server.Log.Error("error update user ", key, " ", err.Error())
 				continue
 			}
 			r.config.DB.Set([]byte(key), nodebytes, nil)
@@ -133,7 +139,7 @@ func (r *WeatherHook) OnSysInfoTick(si *system.Info) {
 		if _, ok := dedupe[fmt.Sprintf("%s%v%v", nr.GridID, nr.GridX, nr.GridY)]; !ok {
 			forecast, err := r.config.NOAA.GridPointsForecast(nr.GridID, int64(nr.GridX), int64(nr.GridY))
 			if err != nil {
-				r.config.Server.Log.Error("unable to get gridpoints ", key, " ", err)
+				r.config.Server.Log.Error("unable to get gridpoints ", key, " ", err.Error())
 				return
 			}
 
@@ -141,14 +147,41 @@ func (r *WeatherHook) OnSysInfoTick(si *system.Info) {
 				r.config.Server.Log.Error("invalid forecast length ", key)
 				continue
 			}
+
 			msg := fmt.Sprintf("mesh hourly forecast: %s precip: %v %% chance.",
 				forecast.Properties.Periods[0].DetailedForecast,
 				forecast.Properties.Periods[0].ProbabilityOfPrecipitation.Value,
 			)
 			// todo: configure channels for weather updates
 			// for now just send them to the private system channel as to not be annoying
-			r.config.Radio.Send(msg, 0, 2)
+			r.config.Radio.Send(msg, 0, 1)
 			dedupe[fmt.Sprintf("%s%v%v", nr.GridID, nr.GridX, nr.GridY)] = true
+		}
+
+		// alerts
+		alerts, err := r.config.NOAA.Alerts(lat, long)
+		if err != nil {
+			r.config.Server.Log.Error("error fetching noaa alerts ", err)
+			continue
+		}
+
+		for _, alert := range alerts.Alerts {
+			if _, closer, err := r.config.DB.Get([]byte(alert.ID)); err != nil {
+				r.config.Server.Log.Info("error fetching noaa alert ", err)
+			} else {
+				closer.Close()
+				continue
+			}
+
+			if data, err := json.Marshal(alert); err == nil {
+				r.config.DB.Set([]byte(alert.ID), data, nil)
+				msg := fmt.Sprintf("severity: %s. certainty: %s. %s",
+					alert.Properties.Severity,
+					alert.Properties.Certainty,
+					alert.Properties.Headline)
+
+				r.config.Radio.Send(msg, 0, 1)
+			}
 		}
 	}
 }

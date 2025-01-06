@@ -54,3 +54,14 @@ func (n *NOAAClient) GridPointsForecast(gridID string, gridX, gridY int64) (*mod
 	}
 	return &result, err
 }
+
+func (n *NOAAClient) Alerts(lat, long float64) (*models.AlertResponse, error) {
+	result := models.AlertResponse{}
+	resp, err := n.client.R().
+		SetResult(&result).
+		Get(fmt.Sprintf("/alerts/active?point=%v,%v", lat, long))
+	if resp.IsError() {
+		return nil, err
+	}
+	return &result, err
+}
